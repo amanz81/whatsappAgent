@@ -1,0 +1,44 @@
+# Sensitive files - NEVER commit these
+service-account.json
+*.pem
+*.key
+
+# Environment files
+.env
+.env.local
+.env.*.local
+# Note: .env.example IS committed (contains no secrets)
+
+# Logs
+*.log
+logs.txt
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+
+# Ngrok binaries and archives
+ngrok.exe
+ngrok
+ngrok.zip
+
+# Test files (not needed in production)
+test_*.py
+drive_test.py
+
+# Temporary JSON files
+create_instance.json
+create_wifewhatsup.json
+
+# IDE
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Batch files (local development)
+*.bat

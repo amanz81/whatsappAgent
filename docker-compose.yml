@@ -1,0 +1,81 @@
+services:
+  evolution_api:
+    container_name: evolution_api
+    image: evoapicloud/evolution-api:v2.3.5
+    restart: always
+    shm_size: '2gb' # Fix: Prevent Chromium crashes
+    ports:
+      - "8081:8080"
+      - "8082:8082"
+    environment:
+      - AUTHENTICATION_API_KEY=assaftest#1!
+      # CRITICAL CHANGE: Use internal Docker network URL instead of public tunnel
+      - WEBHOOK_GLOBAL_URL=http://localhost:8082/whatsapp-webhook
+      - WEBHOOK_GLOBAL_ENABLED=true
+      - DATABASE_ENABLED=true
+      - DATABASE_PROVIDER=postgresql # <--- כאן היה השינוי מ-postgres ל-postgresql
+      - STICKER_CREATOR=Evolution
+      - SERVER_URL=http://localhost:8081
+      - WEBSOCKET_ENABLED=true
+      - DATABASE_CONNECTION_URI=postgresql://postgres:password@postgres:5432/evolution
+      - CACHE_REDIS_ENABLED=true
+      - CACHE_REDIS_URI=redis://redis:6379/1
+      - CACHE_REDIS_PREFIX_KEY=evolution
+      # RabbitMQ Configuration
+      - RABBITMQ_ENABLED=true
+      - RABBITMQ_URI=amqp://guest:guest@rabbitmq:5672
+      # Fix: IPv4 preference and networking (Keeping these as they are still useful)
+      - NODE_OPTIONS=--dns-result-order=ipv4first --max-old-space-size=4096
+    sysctls:
+      - net.ipv6.conf.all.disable_ipv6=1
+      - net.ipv6.conf.default.disable_ipv6=1
+    depends_on:
+      - postgres
+      - redis
+      - rabbitmq
+
+  postgres:
+    image: postgres:15-alpine
+    container_name: postgres_db
+    restart: always
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=password
+      - POSTGRES_DB=evolution
+    volumes:
+      - evolution_postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis_db
+    restart: always
+
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    restart: always
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+
+  # New Service: The Python Brain
+  agent:
+    build: .
+    container_name: whatsapp_agent
+    restart: always
+    environment:
+      # Meta WhatsApp API (get from developers.facebook.com)
+      - META_API_TOKEN=${META_API_TOKEN}
+      - META_PHONE_NUMBER_ID=${META_PHONE_NUMBER_ID}
+      # Google Sheets (create sheet, share with service account)
+      - SPREADSHEET_ID=${SPREADSHEET_ID}
+      # Legacy folder ID (optional)
+      - DRIVE_ROOT_FOLDER_ID=${DRIVE_ROOT_FOLDER_ID}
+    volumes:
+      - ./:/app
+    network_mode: service:evolution_api
+    depends_on:
+      - evolution_api
+
+volumes:
+  evolution_postgres_data:
