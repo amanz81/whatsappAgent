@@ -67,10 +67,17 @@ services:
       # Meta WhatsApp API (get from developers.facebook.com)
       - META_API_TOKEN=${META_API_TOKEN}
       - META_PHONE_NUMBER_ID=${META_PHONE_NUMBER_ID}
-      # Google Sheets (create sheet, share with service account)
+      # Google Cloud / Vertex AI
+      - GOOGLE_PROJECT_ID=${GOOGLE_PROJECT_ID}
+      - GOOGLE_LOCATION=${GOOGLE_LOCATION:-us-central1}
+      - GEMINI_MODEL=${GEMINI_MODEL:-gemini-2.0-flash-001}
+      # Google Sheets
       - SPREADSHEET_ID=${SPREADSHEET_ID}
-      # Legacy folder ID (optional)
       - DRIVE_ROOT_FOLDER_ID=${DRIVE_ROOT_FOLDER_ID}
+      # Evolution API (for legacy support)
+      - EVOLUTION_URL=${EVOLUTION_URL:-http://evolution_api:8080}
+      - EVOLUTION_APIKEY=${EVOLUTION_APIKEY}
+      - EVOLUTION_INSTANCE_NAME=${EVOLUTION_INSTANCE_NAME:-CloudAgent}
     volumes:
       - ./:/app
     network_mode: service:evolution_api

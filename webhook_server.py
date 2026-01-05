@@ -78,13 +78,13 @@ from google.oauth2 import service_account
 import google.auth.transport.requests
 import requests
 
-# --- Configuration (Vertex AI) ---
-PROJECT_ID = "wife-business-ai"
-LOCATION = "us-central1"
-GEMINI_MODEL = "gemini-2.0-flash-001" 
-EVOLUTION_URL = "http://evolution_api:8080" # Internal Docker URL
-EVOLUTION_APIKEY = "assaftest#1!"
-INSTANCE_NAME = "CloudAgent" # Make sure this matches your instance
+# --- Configuration (from environment variables) ---
+PROJECT_ID = os.getenv('GOOGLE_PROJECT_ID', 'your-project-id')
+LOCATION = os.getenv('GOOGLE_LOCATION', 'us-central1')
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.0-flash-001')
+EVOLUTION_URL = os.getenv('EVOLUTION_URL', 'http://evolution_api:8080')
+EVOLUTION_APIKEY = os.getenv('EVOLUTION_APIKEY', '')
+INSTANCE_NAME = os.getenv('EVOLUTION_INSTANCE_NAME', 'CloudAgent')
 
 def send_whatsapp_message(number, text):
     """
