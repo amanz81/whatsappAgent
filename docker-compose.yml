@@ -74,6 +74,8 @@ services:
       # Google Sheets
       - SPREADSHEET_ID=${SPREADSHEET_ID}
       - DRIVE_ROOT_FOLDER_ID=${DRIVE_ROOT_FOLDER_ID}
+      # B2B Operations Manager
+      - WHITELIST_NUMBERS=${WHITELIST_NUMBERS:-}
       # Evolution API (for legacy support)
       - EVOLUTION_URL=${EVOLUTION_URL:-http://evolution_api:8080}
       - EVOLUTION_APIKEY=${EVOLUTION_APIKEY}

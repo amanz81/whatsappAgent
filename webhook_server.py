@@ -3,6 +3,7 @@ import uvicorn
 import logging
 import json
 import os
+import re
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 import datetime
@@ -10,14 +11,58 @@ import requests
 import base64
 import google.auth.transport.requests
 
-# Import our new Google Drive service
-from google_drive_service import get_drive_service, parse_gemini_response
+# Import our Google Sheets service
+from google_drive_service import get_drive_service
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
+
+# --- Configuration (from environment variables) ---
+PROJECT_ID = os.getenv('GOOGLE_PROJECT_ID', 'your-project-id')
+LOCATION = os.getenv('GOOGLE_LOCATION', 'us-central1')
+GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.0-flash-001')
+SERVICE_ACCOUNT_FILE = '/app/service-account.json'
+SCOPES = ['https://www.googleapis.com/auth/drive.file']
+
+# B2B Whitelist Configuration
+# Comma-separated phone numbers (without + or spaces)
+WHITELIST_NUMBERS = [
+    num.strip() 
+    for num in os.getenv('WHITELIST_NUMBERS', '').split(',') 
+    if num.strip()
+]
+
+# Verify Service Account File
+if os.path.exists(SERVICE_ACCOUNT_FILE):
+    logger.info(f"Found service account file: {SERVICE_ACCOUNT_FILE}")
+else:
+    logger.warning(f"Service account file NOT found at: {SERVICE_ACCOUNT_FILE}")
+
+logger.info(f"B2B Whitelist loaded: {len(WHITELIST_NUMBERS)} numbers configured")
+
+
+def is_whitelisted(phone_number: str) -> bool:
+    """
+    Check if a phone number is in the B2B whitelist.
+    If whitelist is empty, allow all numbers (for testing/demo).
+    """
+    if not WHITELIST_NUMBERS:
+        logger.debug("Whitelist is empty - allowing all numbers (demo mode)")
+        return True
+    
+    # Normalize the phone number (remove any non-digit characters)
+    normalized = re.sub(r'\D', '', phone_number)
+    
+    for allowed in WHITELIST_NUMBERS:
+        allowed_normalized = re.sub(r'\D', '', allowed)
+        if normalized.endswith(allowed_normalized) or allowed_normalized.endswith(normalized):
+            return True
+    
+    return False
+
 
 # Meta Webhook Verification
 @app.get("/webhook/meta")
@@ -37,6 +82,7 @@ async def verify_meta_webhook(request: Request):
         return Response(content=challenge, media_type="text/plain")
     
     raise HTTPException(status_code=403, detail="Verification failed")
+
 
 # Meta & Evolution Webhook Handler
 @app.post("/webhook/meta")
@@ -58,33 +104,6 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
         logger.error(f"Webhook error: {e}")
         return Response(status_code=200)
 
-SERVICE_ACCOUNT_FILE = '/app/service-account.json'
-SCOPES = ['https://www.googleapis.com/auth/drive.file']
-
-# Verify Service Account File
-if os.path.exists(SERVICE_ACCOUNT_FILE):
-    logger.info(f"Found service account file: {SERVICE_ACCOUNT_FILE}")
-else:
-    logger.warning(f"Service account file NOT found at: {SERVICE_ACCOUNT_FILE}")
-
-def get_raw_drive_api():
-    """Legacy function - returns raw Drive API (not used anymore)"""
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-    return build('drive', 'v3', credentials=creds)
-
-# import google.auth # Already imported
-from google.oauth2 import service_account
-import google.auth.transport.requests
-import requests
-
-# --- Configuration (from environment variables) ---
-PROJECT_ID = os.getenv('GOOGLE_PROJECT_ID', 'your-project-id')
-LOCATION = os.getenv('GOOGLE_LOCATION', 'us-central1')
-GEMINI_MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.0-flash-001')
-EVOLUTION_URL = os.getenv('EVOLUTION_URL', 'http://evolution_api:8080')
-EVOLUTION_APIKEY = os.getenv('EVOLUTION_APIKEY', '')
-INSTANCE_NAME = os.getenv('EVOLUTION_INSTANCE_NAME', 'CloudAgent')
 
 def send_whatsapp_message(number, text):
     """
@@ -118,6 +137,7 @@ def send_whatsapp_message(number, text):
     except Exception as e:
         logger.error(f"Error sending reply: {e}")
 
+
 def get_vertex_token():
     """
     Get generic Google Cloud Access Token using Service Account
@@ -130,96 +150,48 @@ def get_vertex_token():
     creds.refresh(auth_req)
     return creds.token
 
-def get_gemini_response(audio_bytes, mime_type="audio/ogg"):
+
+# B2B System Prompt for Intent Classification
+B2B_SYSTEM_PROMPT = """You are a B2B Operations Manager AI assistant. Analyze the incoming message and classify it for business operations.
+
+You MUST respond with a valid JSON object ONLY (no markdown, no code blocks, no explanation). The JSON must have these exact fields:
+
+{
+    "intent": "<one of: New Task, Revision, Inquiry, Urgent, Noise>",
+    "priority": "<one of: High, Medium, Low>",
+    "summary": "<Brief English summary of the message content, max 200 characters>",
+    "client_action": "<Recommended action in the ORIGINAL language of the message>",
+    "original_language": "<Language of the original message>",
+    "transcription": "<Full transcription if audio, or original text if text message>"
+}
+
+Intent Definitions:
+- New Task: A new request, order, or task that needs to be started
+- Revision: A modification, change, or update to an existing task/order
+- Inquiry: A question or request for information
+- Urgent: Any message marked urgent or requiring immediate attention
+- Noise: Greetings, thanks, confirmations, or non-actionable messages
+
+Priority Guidelines:
+- High: Urgent requests, complaints, time-sensitive matters
+- Medium: Standard business requests, normal tasks
+- Low: General inquiries, follow-ups, non-urgent matters
+
+IMPORTANT: Keep client_action in the ORIGINAL language of the message. Return ONLY the JSON object."""
+
+
+def get_gemini_b2b_response(content: str, content_type: str = "text", audio_bytes: bytes = None, mime_type: str = "audio/ogg"):
     """
-    Call Vertex AI Gemini via REST API (No SDK Hell)
-    """
-    try:
-        token = get_vertex_token()
-        if not token:
-            logger.error("Failed to get Vertex Auth Token")
-            return None
-
-        url = f"https://{LOCATION}-aiplatform.googleapis.com/v1/projects/{PROJECT_ID}/locations/{LOCATION}/publishers/google/models/{GEMINI_MODEL}:generateContent"
-        
-        headers = {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
-        
-        # Base64 encode audio
-        b64_audio = base64.b64encode(audio_bytes).decode('utf-8')
-        
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [
-                        {
-                            "inlineData": {
-                                "mimeType": mime_type,
-                                "data": b64_audio
-                            }
-                        },
-                        {
-                            "text": """
-You are a smart personal assistant analyzing a voice note. Perform these tasks:
-
-1. TRANSCRIBE the audio accurately (include the original language if not English)
-2. Provide a concise SUMMARY of the main points
-3. Extract any ACTION ITEMS (tasks the speaker needs to do or wants someone to do)
-4. Identify any DEADLINES or time-sensitive items mentioned
-5. List any SHOPPING ITEMS or things to buy/get mentioned
-
-Format your response EXACTLY like this:
-
---- TRANSCRIPTION ---
-[Full transcription here]
-
---- SUMMARY ---
-[2-3 sentence summary of the main points]
-
---- ACTION ITEMS ---
-- [Task 1]
-- [Task 2]
-(Leave empty if none found)
-
---- DEADLINES ---
-- [Deadline with date/time if mentioned]
-(Leave empty if none found)
-
---- SHOPPING ITEMS ---
-- [Item 1]
-- [Item 2]
-(Leave empty if none found)
-                            """
-                        }
-                    ]
-                }
-            ]
-        }
-        
-        response = requests.post(url, headers=headers, json=payload)
-        
-        if response.status_code == 200:
-            result = response.json()
-            # Extract text
-            try:
-                return result['candidates'][0]['content']['parts'][0]['text']
-            except (KeyError, IndexError):
-                logger.error(f"Unexpected Vertex Response: {result}")
-                return None
-        else:
-            logger.error(f"Vertex API Error {response.status_code}: {response.text}")
-            return None
-
-    except Exception as e:
-        logger.error(f"Vertex/REST Error: {e}")
-        return None
-
-def get_gemini_text_response(text_content: str):
-    """
-    Call Vertex AI Gemini to analyze text content
+    Call Vertex AI Gemini for B2B intent classification.
+    
+    Args:
+        content: Text content to analyze (or description for audio)
+        content_type: "text" or "audio"
+        audio_bytes: Raw audio bytes if content_type is "audio"
+        mime_type: MIME type of audio
+    
+    Returns:
+        dict: Parsed B2B classification or None on error
     """
     try:
         token = get_vertex_token()
@@ -234,49 +206,35 @@ def get_gemini_text_response(text_content: str):
             "Content-Type": "application/json"
         }
         
+        # Build the request parts
+        parts = []
+        
+        if content_type == "audio" and audio_bytes:
+            # Add audio data
+            b64_audio = base64.b64encode(audio_bytes).decode('utf-8')
+            parts.append({
+                "inlineData": {
+                    "mimeType": mime_type,
+                    "data": b64_audio
+                }
+            })
+            parts.append({"text": B2B_SYSTEM_PROMPT + "\n\nAnalyze the above voice message."})
+        else:
+            # Text only
+            parts.append({"text": B2B_SYSTEM_PROMPT + f"\n\nAnalyze this message:\n{content}"})
+        
         payload = {
             "contents": [
                 {
                     "role": "user",
-                    "parts": [
-                        {
-                            "text": f"""
-You are a smart personal assistant analyzing a text note. Perform these tasks:
-
-1. SUMMARIZE the main points
-2. Extract any ACTION ITEMS (tasks to do)
-3. Identify any DEADLINES or time-sensitive items
-4. List any SHOPPING ITEMS or things to buy/get
-
-The text to analyze:
-{text_content}
-
-Format your response EXACTLY like this:
-
---- TRANSCRIPTION ---
-{text_content}
-
---- SUMMARY ---
-[2-3 sentence summary of the main points]
-
---- ACTION ITEMS ---
-- [Task 1]
-- [Task 2]
-(Leave empty if none found)
-
---- DEADLINES ---
-- [Deadline with date/time if mentioned]
-(Leave empty if none found)
-
---- SHOPPING ITEMS ---
-- [Item 1]
-- [Item 2]
-(Leave empty if none found)
-                            """
-                        }
-                    ]
+                    "parts": parts
                 }
-            ]
+            ],
+            "generationConfig": {
+                "temperature": 0.1,  # Low temperature for consistent JSON output
+                "topP": 0.8,
+                "maxOutputTokens": 1024
+            }
         }
         
         response = requests.post(url, headers=headers, json=payload)
@@ -284,7 +242,8 @@ Format your response EXACTLY like this:
         if response.status_code == 200:
             result = response.json()
             try:
-                return result['candidates'][0]['content']['parts'][0]['text']
+                raw_text = result['candidates'][0]['content']['parts'][0]['text']
+                return parse_b2b_json_response(raw_text)
             except (KeyError, IndexError):
                 logger.error(f"Unexpected Vertex Response: {result}")
                 return None
@@ -296,103 +255,184 @@ Format your response EXACTLY like this:
         logger.error(f"Vertex/REST Error: {e}")
         return None
 
-def process_text_message(sender_number: str, text_content: str):
+
+def parse_b2b_json_response(response_text: str) -> dict:
     """
-    Process a text message triggered by 'keepAI' keyword.
-    1. Analyze with Gemini
-    2. Save to Google Sheets
-    3. Send confirmation
+    Parse Gemini's B2B JSON response with fallback for malformed output.
+    
+    Returns:
+        dict: Parsed data with intent classification fields
+    """
+    # Default fallback structure
+    fallback = {
+        "intent": "Noise",
+        "priority": "Low",
+        "summary": "Could not parse message",
+        "client_action": "Manual review required",
+        "original_language": "Unknown",
+        "transcription": "",
+        "parse_error": False,
+        "raw_response": ""
+    }
+    
+    if not response_text:
+        fallback["parse_error"] = True
+        return fallback
+    
+    try:
+        # Clean up the response - remove markdown code blocks if present
+        cleaned = response_text.strip()
+        
+        # Remove markdown code block markers
+        if cleaned.startswith("```json"):
+            cleaned = cleaned[7:]
+        elif cleaned.startswith("```"):
+            cleaned = cleaned[3:]
+        if cleaned.endswith("```"):
+            cleaned = cleaned[:-3]
+        
+        cleaned = cleaned.strip()
+        
+        # Try to parse as JSON
+        parsed = json.loads(cleaned)
+        
+        # Validate required fields exist
+        required_fields = ["intent", "priority", "summary", "client_action"]
+        for field in required_fields:
+            if field not in parsed:
+                logger.warning(f"Missing required field: {field}")
+                parsed[field] = fallback.get(field, "")
+        
+        # Validate intent values
+        valid_intents = ["New Task", "Revision", "Inquiry", "Urgent", "Noise"]
+        if parsed.get("intent") not in valid_intents:
+            logger.warning(f"Invalid intent '{parsed.get('intent')}', defaulting to 'Noise'")
+            parsed["intent"] = "Noise"
+        
+        # Validate priority values
+        valid_priorities = ["High", "Medium", "Low"]
+        if parsed.get("priority") not in valid_priorities:
+            logger.warning(f"Invalid priority '{parsed.get('priority')}', defaulting to 'Medium'")
+            parsed["priority"] = "Medium"
+        
+        parsed["parse_error"] = False
+        return parsed
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON parse error: {e}")
+        logger.error(f"Raw response: {response_text[:500]}")
+        
+        # Fallback: extract what we can from the raw text
+        fallback["parse_error"] = True
+        fallback["raw_response"] = response_text[:1000]
+        fallback["summary"] = response_text[:200] if response_text else "Parse error"
+        fallback["client_action"] = "Manual review required - AI response was not valid JSON"
+        return fallback
+
+
+def process_text_message(sender_number: str, text_content: str, wamid: str = None, meta_timestamp: str = None):
+    """
+    Process a text message from a B2B client.
+    No trigger word required - all messages from whitelisted numbers are processed.
+    
+    Args:
+        sender_number: Phone number of sender
+        text_content: Message content
+        wamid: WhatsApp Message ID for legal proof
+        meta_timestamp: Original timestamp from Meta
     """
     try:
-        logger.info(f"Processing text message from {sender_number}")
+        logger.info(f"Processing B2B text message from {sender_number}")
         
-        # Remove the keepAI trigger from the text
-        import re
-        clean_text = re.sub(r'keepai', '', text_content, flags=re.IGNORECASE).strip()
-        
-        if not clean_text:
-            send_whatsapp_message(sender_number, "📝 Please include some text after 'keepAI' to save.")
+        if not text_content.strip():
+            logger.info("Empty message content, skipping")
             return
         
         # Send acknowledgment
-        send_whatsapp_message(sender_number, "📝 Text note received! Analyzing...")
+        send_whatsapp_message(sender_number, "📋 Message received! Processing...")
         
-        # Analyze with Gemini
-        logger.info("Sending text to Gemini...")
-        analysis_text = get_gemini_text_response(clean_text)
+        # Analyze with Gemini B2B
+        logger.info("Sending to Gemini for B2B classification...")
+        b2b_data = get_gemini_b2b_response(text_content, content_type="text")
         
-        if not analysis_text:
+        if not b2b_data:
             logger.error("Gemini returned no analysis for text.")
-            send_whatsapp_message(sender_number, "❌ Failed to analyze text.")
+            send_whatsapp_message(sender_number, "❌ Failed to analyze message.")
             return
         
-        logger.info("Gemini Text Analysis Complete!")
+        logger.info(f"B2B Classification: intent={b2b_data.get('intent')}, priority={b2b_data.get('priority')}")
         
-        # Parse the response
-        parsed_data = parse_gemini_response(analysis_text)
-        parsed_data['timestamp'] = datetime.datetime.now()
-        parsed_data['transcription'] = clean_text  # Use original text
+        # Add metadata for logging
+        b2b_data['timestamp'] = datetime.datetime.now()
+        b2b_data['wamid'] = wamid
+        b2b_data['meta_timestamp'] = meta_timestamp
+        b2b_data['original_message'] = text_content
+        b2b_data['media_url'] = None  # No media for text messages
         
         # Save to Google Sheets
-        logger.info("Saving text note to Google Sheets...")
+        logger.info("Saving to Google Sheets...")
         drive_service = get_drive_service()
-        drive_result = drive_service.save_voice_note(sender_number, parsed_data)
+        drive_result = drive_service.save_b2b_task(sender_number, b2b_data)
         
         if drive_result['success']:
             logger.info(f"Saved to Sheets: {drive_result.get('doc_url')}")
             
-            action_count = len(parsed_data.get('action_items', []))
-            shopping_count = len(parsed_data.get('shopping_items', []))
-            deadline_count = len(parsed_data.get('deadlines', []))
+            # Build user-friendly reply
+            intent_emoji = {
+                "New Task": "🆕",
+                "Revision": "🔄",
+                "Inquiry": "❓",
+                "Urgent": "🚨",
+                "Noise": "💬"
+            }
             
-            summary = parsed_data.get('summary', 'Text note processed.')
+            emoji = intent_emoji.get(b2b_data.get('intent', 'Noise'), "📝")
             
-            reply_parts = ["✅ *Got it!* Your text note has been saved.\n"]
-            reply_parts.append(f"📋 *Summary:* {summary[:200]}..." if len(summary) > 200 else f"📋 *Summary:* {summary}")
+            reply_parts = [f"{emoji} *{b2b_data.get('intent', 'Received')}* - {b2b_data.get('priority', 'Medium')} Priority\n"]
+            reply_parts.append(f"📋 {b2b_data.get('summary', 'Message logged')}")
             
-            if action_count > 0:
-                reply_parts.append(f"\n✅ Found {action_count} action item(s)")
-            if deadline_count > 0:
-                reply_parts.append(f"\n⏰ Found {deadline_count} deadline(s)")
-            if shopping_count > 0:
-                reply_parts.append(f"\n🛒 Found {shopping_count} shopping item(s)")
+            if b2b_data.get('client_action'):
+                reply_parts.append(f"\n\n💡 *Action:* {b2b_data.get('client_action')}")
             
-            reply_parts.append(f"\n\n📁 View all notes: {drive_result.get('doc_url', 'Check your Drive')}")
+            reply_parts.append(f"\n\n📁 {drive_result.get('doc_url')}")
             
             final_reply = ''.join(reply_parts)
         else:
             logger.error(f"Failed to save to Sheets: {drive_result.get('error')}")
-            final_reply = f"✅ *Analysis Complete*\n\n{analysis_text}\n\n⚠️ Note: Failed to save to Sheets."
+            final_reply = f"✅ *Received*\n\n{b2b_data.get('summary', 'Message logged')}\n\n⚠️ Note: Failed to save to Sheets."
         
         send_whatsapp_message(sender_number, final_reply)
 
     except Exception as e:
         logger.error(f"Error processing text message: {e}")
-        send_whatsapp_message(sender_number, f"❌ Error processing text: {str(e)}")
+        send_whatsapp_message(sender_number, f"❌ Error processing message: {str(e)}")
 
-def process_voice_note(message_data: dict):
+
+def process_voice_note(message_data: dict, wamid: str = None, meta_timestamp: str = None):
     """
-    Background Task:
+    Background Task for B2B voice message processing:
     1. Download audio
-    2. Transcribe/Summarize with Vertex AI
-    3. Upload to Google Drive
+    2. Classify with Vertex AI Gemini
+    3. Log to Google Sheets
+    
+    Args:
+        message_data: Message payload
+        wamid: WhatsApp Message ID for legal proof  
+        meta_timestamp: Original timestamp from Meta
     """
     try:
         msg_id = message_data.get('id', 'unknown')
-        logger.info(f"Processing Voice Note ID: {msg_id}")
+        logger.info(f"Processing B2B Voice Note ID: {msg_id}")
         
         msg_content = message_data.get("message", {})
         
-        # Extract Sender Number (remoteJid)
-        # Structure: data -> key -> remoteJid
+        # Extract Sender Number
         key = message_data.get("key", {})
         sender_jid = key.get("remoteJid")
         
-        # Clean JID (remove @s.whatsapp.net) usually not needed for Evolution, but safe to keep
         if sender_jid:
              sender_number = sender_jid.split("@")[0]
-             # Send "Processing..." update
-             send_whatsapp_message(sender_number, "🎙️ Voice Note received! Transcribing...")
+             send_whatsapp_message(sender_number, "🎙️ Voice message received! Analyzing...")
         else:
              sender_number = None
 
@@ -415,10 +455,8 @@ def process_voice_note(message_data: dict):
              token = os.getenv('META_API_TOKEN', '')
              headers = {"Authorization": f"Bearer {token}"}
         
-        # Always add User-Agent
         headers["User-Agent"] = "Mozilla/5.0 (compatible; WhatsAppAgent/1.0)"
 
-        import requests
         response = requests.get(audio_url, headers=headers)
         
         if response.status_code != 200:
@@ -430,55 +468,61 @@ def process_voice_note(message_data: dict):
         audio_bytes = response.content
         logger.info(f"Audio Downloaded: {len(audio_bytes)} bytes")
         
-        # 3. Call Gemini
-        logger.info("Sending to Gemini (Vertex AI)...")
-        analysis_text = get_gemini_response(audio_bytes, mimetype)
+        # 3. Call Gemini B2B Classification
+        logger.info("Sending to Gemini for B2B classification...")
+        b2b_data = get_gemini_b2b_response(
+            content="Voice message", 
+            content_type="audio",
+            audio_bytes=audio_bytes,
+            mime_type=mimetype
+        )
         
-        if not analysis_text:
-            logger.error("Gemini returned no text.")
+        if not b2b_data:
+            logger.error("Gemini returned no classification.")
             if sender_number:
-                send_whatsapp_message(sender_number, "❌ Gemini failed to analyze audio.")
+                send_whatsapp_message(sender_number, "❌ Failed to analyze voice message.")
             return
             
-        logger.info("Gemini Analysis Complete!")
+        logger.info(f"B2B Classification: intent={b2b_data.get('intent')}, priority={b2b_data.get('priority')}")
         
-        # Parse the structured response
-        parsed_data = parse_gemini_response(analysis_text)
-        parsed_data['timestamp'] = datetime.datetime.now()
+        # Add metadata for logging
+        b2b_data['timestamp'] = datetime.datetime.now()
+        b2b_data['wamid'] = wamid or msg_id
+        b2b_data['meta_timestamp'] = meta_timestamp
+        b2b_data['original_message'] = b2b_data.get('transcription', '[Voice Message]')
+        b2b_data['media_url'] = audio_url
         
-        # Save to Google Drive
-        logger.info("Saving to Google Drive...")
+        # 4. Save to Google Sheets
+        logger.info("Saving to Google Sheets...")
         drive_service = get_drive_service()
-        drive_result = drive_service.save_voice_note(sender_number, parsed_data)
+        drive_result = drive_service.save_b2b_task(sender_number, b2b_data)
         
         if drive_result['success']:
-            logger.info(f"Saved to Drive: {drive_result.get('doc_url')}")
+            logger.info(f"Saved to Sheets: {drive_result.get('doc_url')}")
             
             # Build user-friendly reply
-            action_count = len(parsed_data.get('action_items', []))
-            shopping_count = len(parsed_data.get('shopping_items', []))
-            deadline_count = len(parsed_data.get('deadlines', []))
+            intent_emoji = {
+                "New Task": "🆕",
+                "Revision": "🔄", 
+                "Inquiry": "❓",
+                "Urgent": "🚨",
+                "Noise": "💬"
+            }
             
-            # Summary message
-            summary = parsed_data.get('summary', 'Voice note processed.')
+            emoji = intent_emoji.get(b2b_data.get('intent', 'Noise'), "📝")
             
-            reply_parts = ["✅ *Got it!* Your voice note has been saved.\n"]
-            reply_parts.append(f"📋 *Summary:* {summary[:200]}..." if len(summary) > 200 else f"📋 *Summary:* {summary}")
+            reply_parts = [f"{emoji} *{b2b_data.get('intent', 'Received')}* - {b2b_data.get('priority', 'Medium')} Priority\n"]
+            reply_parts.append(f"📋 {b2b_data.get('summary', 'Voice message logged')}")
             
-            if action_count > 0:
-                reply_parts.append(f"\n✅ Found {action_count} action item(s)")
-            if deadline_count > 0:
-                reply_parts.append(f"\n⏰ Found {deadline_count} deadline(s)")
-            if shopping_count > 0:
-                reply_parts.append(f"\n🛒 Found {shopping_count} shopping item(s)")
+            if b2b_data.get('client_action'):
+                reply_parts.append(f"\n\n💡 *Action:* {b2b_data.get('client_action')}")
             
-            reply_parts.append(f"\n\n📁 View all notes: {drive_result.get('doc_url', 'Check your Drive')}")
+            reply_parts.append(f"\n\n📁 {drive_result.get('doc_url')}")
             
             final_reply = ''.join(reply_parts)
         else:
-            logger.error(f"Failed to save to Drive: {drive_result.get('error')}")
-            # Still send the analysis even if Drive fails
-            final_reply = f"✅ *Analysis Complete*\n\n{analysis_text}\n\n⚠️ Note: Failed to save to Drive."
+            logger.error(f"Failed to save to Sheets: {drive_result.get('error')}")
+            final_reply = f"✅ *Received*\n\n{b2b_data.get('summary', 'Voice message logged')}\n\n⚠️ Note: Failed to save to Sheets."
         
         if sender_number:
             send_whatsapp_message(sender_number, final_reply)
@@ -486,20 +530,19 @@ def process_voice_note(message_data: dict):
     except Exception as e:
         logger.error(f"Error processing voice note: {e}")
         if 'sender_number' in locals() and sender_number:
-             send_whatsapp_message(sender_number, f"❌ Error processing voice note: {str(e)}")
+             send_whatsapp_message(sender_number, f"❌ Error processing voice message: {str(e)}")
+
 
 @app.get("/")
 async def root():
-    return {"message": "WhatsApp Agent Brain is Running!"}
-
+    return {"message": "WhatsApp B2B Operations Manager is Running!", "whitelist_count": len(WHITELIST_NUMBERS)}
 
 
 async def process_webhook_data(data):
     """
-    Background worker to handle analytics and logic
+    Background worker to handle B2B message processing
     """
     try:
-        # Log full data
         logger.info(f"Full Payload: {json.dumps(data)}")
 
         # 1. Handle Standard Meta Cloud API
@@ -510,10 +553,19 @@ async def process_webhook_data(data):
                      if "messages" in value:
                           for msg in value["messages"]:
                               sender_number = msg.get('from')
+                              wamid = msg.get('id')  # Message ID for legal proof
+                              meta_timestamp = msg.get('timestamp')  # Unix timestamp
+                              
+                              # Check whitelist
+                              if not is_whitelisted(sender_number):
+                                  logger.info(f"Ignoring message from non-whitelisted number: {sender_number}")
+                                  continue
+                              
+                              logger.info(f"Processing message from whitelisted number: {sender_number}")
                               
                               # Handle audio/voice messages
                               if msg.get("type") == "audio":
-                                  logger.info("Detected Standard Meta Audio Message")
+                                  logger.info("Detected B2B Audio Message")
                                   normalized = {
                                       "key": {"remoteJid": f"{sender_number}@s.whatsapp.net"},
                                       "message": {
@@ -522,37 +574,46 @@ async def process_webhook_data(data):
                                               "mimetype": msg.get("audio", {}).get("mime_type")
                                           }
                                       },
-                                      "id": msg.get("id")
+                                      "id": wamid
                                   }
-                                  process_voice_note(normalized)
+                                  process_voice_note(normalized, wamid=wamid, meta_timestamp=meta_timestamp)
                               
-                              # Handle text messages with "keepAI" trigger
+                              # Handle ALL text messages (no keepAI trigger required)
                               elif msg.get("type") == "text":
                                   text_body = msg.get("text", {}).get("body", "")
-                                  if "keepai" in text_body.lower():
-                                      logger.info(f"Detected 'keepAI' trigger in text message")
-                                      process_text_message(sender_number, text_body)
+                                  logger.info(f"Processing B2B text message: {text_body[:50]}...")
+                                  process_text_message(sender_number, text_body, wamid=wamid, meta_timestamp=meta_timestamp)
              return {"status": "success"}
 
-        # 2. Handle Evolution API
+        # 2. Handle Evolution API (legacy support)
         event_type = data.get("type")
         logger.info(f"Processing event: {event_type}")
         
         if event_type == "MESSAGES_UPSERT":
             message_data = data.get("data", {})
             msg_content = message_data.get("message", {})
+            
+            # Extract sender for whitelist check
+            key = message_data.get("key", {})
+            sender_jid = key.get("remoteJid", "")
+            sender_number = sender_jid.split("@")[0] if sender_jid else ""
+            
+            if not is_whitelisted(sender_number):
+                logger.info(f"Ignoring Evolution message from non-whitelisted: {sender_number}")
+                return {"status": "success"}
 
             if "audioMessage" in msg_content:
-                logger.info("Voice note detected (Key Found)! Queuing background task.")
+                logger.info("B2B Voice note detected via Evolution!")
                 process_voice_note(message_data)
             elif "audioMessage" in str(msg_content):
-                 logger.info("Voice note detected (String Check)! Queuing background task.")
+                 logger.info("B2B Voice note detected (String Check) via Evolution!")
                  process_voice_note(message_data)
         
         return {"status": "success"}
     except Exception as e:
         logger.error(f"Webhook error: {e}")
         return {"status": "error", "detail": str(e)}
+
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8082)

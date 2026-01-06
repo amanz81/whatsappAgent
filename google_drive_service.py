@@ -1,15 +1,17 @@
 """
-Google Sheets Service for WhatsApp Voice Notes
-Simple approach: Appends to a spreadsheet YOU create and share with the service account.
+Google Sheets Service for B2B Operations Manager
+Logs structured tasks with intent classification, priority, and client name lookup.
 
 SETUP:
-1. Create a Google Sheet manually
-2. Add headers: Timestamp | Phone | Summary | Action Items | Deadlines | Shopping | Transcription
-3. Share with: whatsapp-agent@wife-business-ai.iam.gserviceaccount.com (Editor)
-4. Copy the spreadsheet ID from the URL and set SPREADSHEET_ID env var
+1. Create a Google Sheet with headers:
+   Timestamp | Client Name | Phone Number | Intent | Priority | Summary | Action Items | Media Link
+2. Share with your service account (Editor)
+3. Set SPREADSHEET_ID env var
+4. Create clients.json with phone-to-name mapping
 """
 
 import os
+import json
 import logging
 from datetime import datetime
 from google.oauth2 import service_account
@@ -20,13 +22,48 @@ logger = logging.getLogger(__name__)
 # Configuration
 SERVICE_ACCOUNT_FILE = os.getenv('SERVICE_ACCOUNT_FILE', '/app/service-account.json')
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
-
-# Get spreadsheet ID from URL: https://docs.google.com/spreadsheets/d/[SPREADSHEET_ID]/edit
 SPREADSHEET_ID = os.getenv('SPREADSHEET_ID', None)
+CLIENTS_FILE = os.getenv('CLIENTS_FILE', '/app/clients.json')
+
+# Load client name mapping
+_client_names = {}
+
+def _load_client_names():
+    """Load phone-to-name mapping from clients.json"""
+    global _client_names
+    try:
+        # Try container path first, then local path
+        paths = [CLIENTS_FILE, './clients.json', 'clients.json']
+        for path in paths:
+            if os.path.exists(path):
+                with open(path, 'r', encoding='utf-8') as f:
+                    _client_names = json.load(f)
+                logger.info(f"Loaded {len(_client_names)} client names from {path}")
+                return
+        logger.warning("clients.json not found - client names will be empty")
+    except Exception as e:
+        logger.error(f"Error loading clients.json: {e}")
+
+_load_client_names()
+
+def get_client_name(phone_number: str) -> str:
+    """Look up client name by phone number"""
+    if not phone_number:
+        return ""
+    # Normalize phone number (remove non-digits)
+    normalized = ''.join(c for c in phone_number if c.isdigit())
+    # Try exact match first, then partial matches
+    if normalized in _client_names:
+        return _client_names[normalized]
+    # Try matching last 9-10 digits
+    for stored_phone, name in _client_names.items():
+        if normalized.endswith(stored_phone[-9:]) or stored_phone.endswith(normalized[-9:]):
+            return name
+    return ""
 
 
 class GoogleSheetsService:
-    """Appends voice notes to a shared Google Sheet"""
+    """Manages B2B task logging to Google Sheets"""
     
     def __init__(self):
         self.sheets_service = None
@@ -46,75 +83,126 @@ class GoogleSheetsService:
                 sa_file, scopes=SCOPES
             )
             self.sheets_service = build('sheets', 'v4', credentials=creds)
-            logger.info("Google Sheets service initialized")
+            logger.info("Google Sheets service initialized for B2B Operations")
             
         except Exception as e:
             logger.error(f"Failed to initialize Sheets service: {e}")
     
-    def append_note(self, phone_number: str, note_data: dict) -> bool:
-        """Append a voice note row to the spreadsheet."""
+    def save_b2b_task(self, phone_number: str, task_data: dict) -> dict:
+        """
+        Save a B2B task with structured fields to Google Sheets.
+        
+        Expected columns (matching user's sheet):
+        Timestamp | Client Name | Phone Number | Intent | Priority | Summary | Action Items | Media Link
+        
+        Args:
+            phone_number: Client phone number
+            task_data: Dict with intent, priority, summary, client_action, wamid, meta_timestamp, etc.
+        
+        Returns:
+            dict with success status and doc_url
+        """
         try:
             if not self.sheets_service:
                 logger.error("Sheets service not initialized")
-                return False
+                return {'success': False, 'error': 'Sheets service not initialized'}
             
             if not SPREADSHEET_ID:
                 logger.error("SPREADSHEET_ID environment variable not set!")
-                return False
+                return {'success': False, 'error': 'SPREADSHEET_ID not set'}
             
-            timestamp = note_data.get('timestamp', datetime.now())
-            timestamp_str = timestamp.strftime("%Y-%m-%d %H:%M:%S") if isinstance(timestamp, datetime) else str(timestamp)
+            # Format timestamp
+            timestamp = task_data.get('timestamp', datetime.now())
+            timestamp_str = timestamp.strftime("%Y-%m-%d %H:%M") if isinstance(timestamp, datetime) else str(timestamp)
             
-            action_items = '\n'.join([f"• {item}" for item in note_data.get('action_items', [])])
-            deadlines = '\n'.join([f"• {item}" for item in note_data.get('deadlines', [])])
-            shopping_items = '\n'.join([f"• {item}" for item in note_data.get('shopping_items', [])])
-            
+            # Build row matching user's sheet columns:
+            # Timestamp | Client Name | Phone Number | Intent | Priority | Summary | Action Items | Media Link
+            client_name = get_client_name(phone_number)
             row = [[
-                timestamp_str,
-                phone_number,
-                note_data.get('summary', ''),
-                action_items,
-                deadlines,
-                shopping_items,
-                note_data.get('transcription', '')
+                timestamp_str,                                          # A: Timestamp
+                client_name,                                            # B: Client Name (auto-lookup)
+                phone_number or "",                                     # C: Phone Number
+                task_data.get('intent', 'Unknown'),                     # D: Intent
+                task_data.get('priority', 'Medium'),                    # E: Priority
+                task_data.get('summary', '')[:500],                     # F: Summary (truncated)
+                task_data.get('client_action', ''),                     # G: Action Items
+                task_data.get('media_url', '') or ""                    # H: Media Link
             ]]
             
             self.sheets_service.spreadsheets().values().append(
                 spreadsheetId=SPREADSHEET_ID,
-                range='Sheet1!A:G',
+                range='Sheet1!A:H',  # 8 columns
                 valueInputOption='RAW',
                 insertDataOption='INSERT_ROWS',
                 body={'values': row}
             ).execute()
             
-            logger.info(f"Appended note for {phone_number}")
-            return True
+            logger.info(f"Appended B2B task for {phone_number}: {task_data.get('intent')}")
+            
+            return {
+                'success': True,
+                'doc_url': f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}",
+                'doc_id': SPREADSHEET_ID
+            }
             
         except Exception as e:
-            logger.error(f"Error appending note: {e}")
+            logger.error(f"Error saving B2B task: {e}")
+            return {'success': False, 'error': str(e)}
+    
+    def append_note(self, phone_number: str, note_data: dict) -> bool:
+        """
+        Legacy function for backward compatibility.
+        Converts old note format to B2B task format.
+        """
+        try:
+            # Convert legacy format to B2B format
+            b2b_data = {
+                'intent': 'New Task',
+                'priority': 'Medium',
+                'summary': note_data.get('summary', ''),
+                'timestamp': note_data.get('timestamp', datetime.now()),
+                'original_message': note_data.get('transcription', ''),
+                'wamid': '',
+                'meta_timestamp': '',
+                'media_url': ''
+            }
+            
+            result = self.save_b2b_task(phone_number, b2b_data)
+            return result.get('success', False)
+            
+        except Exception as e:
+            logger.error(f"Error in legacy append_note: {e}")
             return False
     
     def save_voice_note(self, phone_number: str, note_data: dict) -> dict:
-        """Main entry point."""
+        """
+        Legacy entry point for backward compatibility.
+        Redirects to B2B task saving.
+        """
         try:
-            success = self.append_note(phone_number, note_data)
+            # Convert legacy format
+            b2b_data = {
+                'intent': 'New Task',
+                'priority': 'Medium',
+                'summary': note_data.get('summary', ''),
+                'timestamp': note_data.get('timestamp', datetime.now()),
+                'original_message': note_data.get('transcription', ''),
+                'wamid': note_data.get('wamid', ''),
+                'meta_timestamp': note_data.get('meta_timestamp', ''),
+                'media_url': note_data.get('media_url', '')
+            }
             
-            if success:
-                return {
-                    'success': True,
-                    'doc_url': f"https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}",
-                    'doc_id': SPREADSHEET_ID
-                }
-            else:
-                return {'success': False, 'error': 'Failed to append note'}
+            return self.save_b2b_task(phone_number, b2b_data)
             
         except Exception as e:
             return {'success': False, 'error': str(e)}
 
 
+# Singleton instance
 _sheets_service = None
 
 def get_drive_service() -> GoogleSheetsService:
+    """Get singleton instance of GoogleSheetsService"""
     global _sheets_service
     if _sheets_service is None:
         _sheets_service = GoogleSheetsService()
@@ -122,7 +210,12 @@ def get_drive_service() -> GoogleSheetsService:
 
 
 def parse_gemini_response(response_text: str) -> dict:
-    """Parse Gemini's structured response."""
+    """
+    Legacy function: Parse Gemini's structured text response.
+    Kept for backward compatibility with old note-taking format.
+    
+    NOTE: New B2B flow uses JSON parsing in webhook_server.py
+    """
     result = {
         'transcription': '', 'summary': '',
         'action_items': [], 'deadlines': [], 'shopping_items': [],
@@ -164,6 +257,7 @@ def parse_gemini_response(response_text: str) -> dict:
 
 
 def _save_section(result: dict, section: str, content: list):
+    """Helper to save parsed section content"""
     text = '\n'.join(content).strip()
     
     if section in ['action_items', 'deadlines', 'shopping_items']:
