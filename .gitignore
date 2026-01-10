@@ -1,5 +1,8 @@
 # Sensitive files - NEVER commit these
 service-account.json
+clients.json
+wpp-gateway/session/
+session/
 *.pem
 *.key
 

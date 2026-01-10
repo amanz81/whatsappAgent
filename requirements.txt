@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+jinja2
 requests
 google-auth
 google-auth-oauthlib
@@ -7,5 +8,5 @@ google-auth-httplib2
 google-api-python-client
 google-generativeai
 python-multipart
-google-cloud-aiplatform
+google-cloud-aiplatform==1.38.1
 httpx
