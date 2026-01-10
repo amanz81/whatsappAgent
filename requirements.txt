@@ -10,3 +10,4 @@ google-generativeai
 python-multipart
 google-cloud-aiplatform==1.38.1
 httpx
+sqlalchemy
