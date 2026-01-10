@@ -1,20 +1,24 @@
 services:
   # WhatsApp Web.js Gateway - Personal WhatsApp API
   # QR code will be shown in container logs: docker-compose logs -f wpp-gateway
-  wpp-gateway:
-    build: ./wpp-gateway
-    container_name: wpp_gateway
+  # Official WPPConnect Server
+  wppconnect:
+    image: wppconnect/server-cli:latest
+    container_name: wppconnect
     restart: always
     ports:
-      - "3000:3000"
+      - "21465:21465"
     environment:
-      - WEBHOOK_URL=http://whatsapp_agent:8082/webhook/wpp
-      - PORT=3000
-      - SESSION_NAME=${WPP_SESSION:-default}
-    volumes:
-      - wpp_session:/app/session
+      - WEBHOOK=http://whatsapp_agent:8082/webhook/wpp
+      - SERVER_PORT=21465
+      - SECRET_KEY=${WPP_SECRET_KEY:-mysecurekey}
+      - TOKEN=${WPP_TOKEN:-mysecuretoken}
+      - LOG_LEVEL=ERROR
     networks:
       - whatsapp_network
+    volumes:
+      - wpp_tokens:/usr/src/app/tokens
+      - wpp_data:/usr/src/app/.wppconnect
 
   # Python B2B Operations Manager Agent
   whatsapp_agent:
@@ -37,21 +41,23 @@ services:
       # Clients file for name lookup
       - CLIENTS_FILE=/app/clients.json
       # B2B Operations Manager
-      - WHITELIST_NUMBERS=${WHITELIST_NUMBERS:-}
-      # WPP Gateway Configuration (new whatsapp-web.js based)
-      - WPP_BASE_URL=http://wpp_gateway:3000
+      - CAST_WHATSAPP_MESSAGES=true
+      # WPP Gateway Configuration (official server)
+      - WPP_BASE_URL=http://wppconnect:21465
       - WPP_SESSION=${WPP_SESSION:-default}
+      - WPP_SECRET_KEY=${WPP_SECRET_KEY:-mysecurekey}
     volumes:
       - ./service-account.json:/app/service-account.json:ro
       - ./clients.json:/app/clients.json
     networks:
       - whatsapp_network
     depends_on:
-      - wpp-gateway
+      - wppconnect
 
 networks:
   whatsapp_network:
     driver: bridge
 
 volumes:
-  wpp_session:
+  wpp_tokens:
+  wpp_data:

@@ -1,8 +1,7 @@
 """
-Automated WPPConnect Webhook Setup Script.
+Automated WPPConnect Server Setup Script.
 
-This script verifies the WPPConnect Gateway configuration and connectivity.
-It ensures the gateway is set to push webhooks to the correct local endpoint.
+Verifies the official WPPConnect Server configuration.
 """
 
 import os
@@ -10,62 +9,47 @@ import requests
 import time
 import logging
 
-# Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 # Configuration
-WPP_BASE_URL = os.getenv('WPP_BASE_URL', 'http://wpp_gateway:3000')
-WEBHOOK_TARGET = os.getenv('WEBHOOK_URL', 'http://whatsapp_agent:8082/webhook/wpp')
+WPP_BASE_URL = os.getenv('WPP_BASE_URL', 'http://wppconnect:21465')
+SESSION = os.getenv('WPP_SESSION', 'default')
+SECRET_KEY = os.getenv('WPP_SECRET_KEY')
 
-def check_gateway_health():
-    """Check if the WPP Gateway is responsive."""
+def check_health():
+    """Check WPPConnect Server info."""
     try:
-        url = f"{WPP_BASE_URL}/health"
-        logger.info(f"Checking Gateway Health at: {url}")
-        res = requests.get(url, timeout=5)
+        # Official server doesn't have a simple /health root usually, 
+        # but /api/{session}/check-connection-session or similar.
+        # Or just checking if port is open.
+        # We'll try to generate a token or get status.
+        
+        # Try version endpoint if available or status
+        url = f"{WPP_BASE_URL}/api/{SESSION}/status-session"
+        headers = {"Authorization": f"Bearer {SECRET_KEY}"}
+        
+        logger.info(f"Checking Session Status at: {url}")
+        res = requests.get(url, headers=headers, timeout=5)
         
         if res.status_code == 200:
             data = res.json()
-            logger.info(f"✅ Gateway is UP. Session: {data.get('session')}, Status: {data.get('status')}")
+            logger.info(f"✅ Server is UP. Response: {data}")
             return True
-        else:
-            logger.error(f"❌ Gateway returned {res.status_code}")
+        elif res.status_code == 401:
+            logger.error("❌ Unauthorized. Check SECRET_KEY.")
             return False
-            
+        else:
+            logger.warning(f"⚠️ Server returned {res.status_code}. It might be starting up.")
+            return False
+
     except Exception as e:
-        logger.error(f"❌ Could not connect to Gateway: {e}")
+        logger.error(f"❌ Connection Failed: {e}")
         return False
 
-def setup_webhook():
-    """
-    In our 'wpp-gateway' architecture (whatsapp-web.js), the webhook URL
-    is set via environment variable WEBHOOK_URL at startup.
-    
-    This function verifies that the configuration is correct.
-    """
-    logger.info("--- WPPConnect Webhook Setup ---")
-    
-    # Check if we are inside Docker (resolving internal names)
-    try:
-        # Check env var
-        logger.info(f"Current Webhook Target Config: {WEBHOOK_TARGET}")
-        
-        if "webhook/wpp" not in WEBHOOK_TARGET:
-            logger.warning("⚠️  WEBHOOK_URL does not look like the standard WPP webhook endpoint")
-        
-        # Verify Gateway
-        if check_gateway_health():
-            logger.info("✅ WPPConnect Webhook Logic is active and configured via Environment.")
-            logger.info("No manual registration required for this gateway version.")
-        else:
-            logger.error("❌ Gateway is unreachable. Ensure 'wpp-gateway' container is running.")
-
-    except Exception as e:
-        logger.error(f"Setup failed: {e}")
-
 if __name__ == "__main__":
-    logger.info("Starting Webhook Setup verification...")
-    # Wait a moment for services to come up if running in compost
-    # time.sleep(2)
-    setup_webhook()
+    logger.info("--- WPPConnect Server Verification ---")
+    if check_health():
+        logger.info("✅ WPPConnect Server is Online and Reachable.")
+    else:
+        logger.warning("⚠️ Could not verify WPPConnect availability.")
