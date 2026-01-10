@@ -299,7 +299,8 @@ def build_reply_message(b2b_data: dict, drive_result: dict) -> str:
 
 def process_text_message(sender_id: str, text_content: str, send_reply_func, 
                          wamid: str = None, meta_timestamp: str = None, 
-                         is_group: bool = False, group_name: str = None):
+                         is_group: bool = False, group_name: str = None,
+                         gateway: str = "Unknown"):
     """
     Process a text message from a B2B client.
     
@@ -311,6 +312,7 @@ def process_text_message(sender_id: str, text_content: str, send_reply_func,
         meta_timestamp: Original timestamp from Meta/WPP
         is_group: Whether this is a group message
         group_name: Name of the group (if applicable)
+        gateway: Channel source (Meta/WPP)
     """
     from google_drive_service import get_drive_service
     
@@ -343,6 +345,7 @@ def process_text_message(sender_id: str, text_content: str, send_reply_func,
         b2b_data['media_url'] = None  # No media for text messages
         b2b_data['is_group'] = is_group
         b2b_data['group_name'] = group_name
+        b2b_data['channel'] = gateway
         
         # Save to Google Sheets
         logger.info("Saving to Google Sheets...")
@@ -366,7 +369,7 @@ def process_text_message(sender_id: str, text_content: str, send_reply_func,
 def process_voice_note(sender_id: str, audio_url: str, mime_type: str, send_reply_func,
                        wamid: str = None, meta_timestamp: str = None,
                        is_group: bool = False, group_name: str = None,
-                       auth_headers: dict = None):
+                       auth_headers: dict = None, gateway: str = "Unknown"):
     """
     Process a voice message from a B2B client.
     
@@ -429,6 +432,7 @@ def process_voice_note(sender_id: str, audio_url: str, mime_type: str, send_repl
         b2b_data['media_url'] = audio_url
         b2b_data['is_group'] = is_group
         b2b_data['group_name'] = group_name
+        b2b_data['channel'] = gateway
         
         # 3. Save to Google Sheets
         logger.info("Saving to Google Sheets...")

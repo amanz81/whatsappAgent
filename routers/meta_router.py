@@ -178,7 +178,8 @@ async def process_meta_webhook_data(data: dict):
                                 wamid=wamid,
                                 meta_timestamp=meta_timestamp,
                                 is_group=False,
-                                auth_headers=auth_headers
+                                auth_headers=auth_headers,
+                                gateway="Meta"
                             )
                     
                     # Handle text messages
@@ -192,7 +193,8 @@ async def process_meta_webhook_data(data: dict):
                             send_reply_func=send_meta_message,
                             wamid=wamid,
                             meta_timestamp=meta_timestamp,
-                            is_group=False
+                            is_group=False,
+                            gateway="Meta"
                         )
 
         return {"status": "success"}

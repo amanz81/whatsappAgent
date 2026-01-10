@@ -93,11 +93,11 @@ class GoogleSheetsService:
         Save a B2B task with structured fields to Google Sheets.
         
         Expected columns (matching user's sheet):
-        Timestamp | Client Name | Phone Number | Intent | Priority | Summary | Action Items | Media Link
+        Timestamp | Client Name | Phone Number | Intent | Priority | Summary | Action Items | Media Link | Gateway
         
         Args:
             phone_number: Client phone number
-            task_data: Dict with intent, priority, summary, client_action, wamid, meta_timestamp, etc.
+            task_data: Dict with intent, priority, summary, client_action, wamid, meta_timestamp, gateway, etc.
         
         Returns:
             dict with success status and doc_url
@@ -116,7 +116,7 @@ class GoogleSheetsService:
             timestamp_str = timestamp.strftime("%Y-%m-%d %H:%M") if isinstance(timestamp, datetime) else str(timestamp)
             
             # Build row matching user's sheet columns:
-            # Timestamp | Client Name | Phone Number | Intent | Priority | Summary | Action Items | Media Link
+            # Timestamp | Client Name | Phone Number | Intent | Priority | Summary | Action Items | Media Link | Channel
             client_name = get_client_name(phone_number)
             row = [[
                 timestamp_str,                                          # A: Timestamp
@@ -126,12 +126,13 @@ class GoogleSheetsService:
                 task_data.get('priority', 'Medium'),                    # E: Priority
                 task_data.get('summary', '')[:500],                     # F: Summary (truncated)
                 task_data.get('client_action', ''),                     # G: Action Items
-                task_data.get('media_url', '') or ""                    # H: Media Link
+                task_data.get('media_url', '') or "",                   # H: Media Link
+                task_data.get('channel', 'Unknown')                     # I: Channel (Meta/WPP)
             ]]
             
             self.sheets_service.spreadsheets().values().append(
                 spreadsheetId=SPREADSHEET_ID,
-                range='Sheet1!A:H',  # 8 columns
+                range='Sheet1!A:I',  # 9 columns
                 valueInputOption='RAW',
                 insertDataOption='INSERT_ROWS',
                 body={'values': row}

@@ -167,7 +167,8 @@ async def process_wpp_webhook_data(data: dict):
                     wamid=wamid,
                     meta_timestamp=str(timestamp),
                     is_group=is_group,
-                    group_name=group_name
+                    group_name=group_name,
+                    gateway="WPP"
                 )
             else:
                 logger.warning("WPP: Voice message without mediaUrl")
@@ -187,7 +188,8 @@ async def process_wpp_webhook_data(data: dict):
                     wamid=wamid,
                     meta_timestamp=str(timestamp),
                     is_group=is_group,
-                    group_name=group_name
+                    group_name=group_name,
+                    gateway="WPP"
                 )
         
         # Handle image messages with caption
@@ -203,7 +205,8 @@ async def process_wpp_webhook_data(data: dict):
                     wamid=wamid,
                     meta_timestamp=str(timestamp),
                     is_group=is_group,
-                    group_name=group_name
+                    group_name=group_name,
+                    gateway="WPP"
                 )
         
         else:
