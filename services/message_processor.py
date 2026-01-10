@@ -395,17 +395,32 @@ def process_voice_note(sender_id: str, audio_url: str, mime_type: str, send_repl
         # 1. Download Audio
         logger.info(f"Downloading Audio from: {audio_url}")
         
-        headers = auth_headers or {}
-        headers["User-Agent"] = "Mozilla/5.0 (compatible; WhatsAppAgent/1.0)"
-        
-        response = requests.get(audio_url, headers=headers)
-        
-        if response.status_code != 200:
-            logger.error(f"Failed to download audio: {response.status_code} - {response.text}")
-            send_reply_func(sender_id, "❌ Failed to download audio.")
-            return
+        if audio_url.startswith("data:"):
+            # Handle Data URI (Base64)
+            try:
+                # Format: data:audio/ogg;base64,.....
+                header, encoded = audio_url.split(",", 1)
+                audio_bytes = base64.b64decode(encoded)
+                logger.info("Decoded Data URI audio")
+            except Exception as e:
+                logger.error(f"Failed to decode data URI: {e}")
+                send_reply_func(sender_id, "❌ Failed to process audio data.")
+                return
+        else:
+            # Handle HTTP URL
+            headers = auth_headers or {}
+            headers["User-Agent"] = "Mozilla/5.0 (compatible; WhatsAppAgent/1.0)"
             
-        audio_bytes = response.content
+            response = requests.get(audio_url, headers=headers)
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to download audio: {response.status_code} - {response.text}")
+                send_reply_func(sender_id, "❌ Failed to download audio.")
+                return
+                
+            audio_bytes = response.content
+            
+        logger.info(f"Audio Ready: {len(audio_bytes)} bytes")
         logger.info(f"Audio Downloaded: {len(audio_bytes)} bytes")
         
         # 2. Call Gemini B2B Classification
